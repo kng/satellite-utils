@@ -9,12 +9,17 @@ from time import sleep
 def main():
     parser = argparse.ArgumentParser(description='Control radio doppler for greencube')
     parser.add_argument('-l', '--locator', required=True, help='Your maidenhead locator')
-    parser.add_argument('-e', '--elevation', default=0, type=int, help="Your elevation")
+    parser.add_argument('-e', '--elevation', default=0, type=int, help='Your elevation')
+    parser.add_argument('-z', '--horizon', default=0, type=float, help='Above this horizon to track rotator')
     parser.add_argument('-f', '--freq', default=435310000, type=int, help='Frequency to track')
     parser.add_argument('-t', '--tunestep', default=50, type=int, help='TX tuning step')
+    parser.add_argument('-d', '--disable_tune', action='store_true', help='Disable VFO tuning on radio')
     parser.add_argument('-n', '--norad', default=53106, type=int, help='NORAD ID to track')
     parser.add_argument('-r', '--righost', default='localhost', type=str, help='rigctld host')
     parser.add_argument('-p', '--rigport', default=4532, type=int, help='rigctl port')
+    parser.add_argument('-R', '--rothost', default='', type=str, help='rotctld host')
+    parser.add_argument('-P', '--rotport', default=4533, type=int, help='rotctl port')
+    parser.add_argument('-T', '--threshold', default=5, type=int, help='rotctl move threshold')
     parser.add_argument('-v', '--verbosity', action='count', default=0, help='Increase verbosity')
     args = parser.parse_args()
 
@@ -33,34 +38,56 @@ def main():
     rig.connect((args.righost, args.rigport))
     rig.settimeout(2.0)
     for q in ['S 1 VFOB', 'M USB 2300', 'X USB 2300']:  # Initialize radio
-        rig_query(rig, q)
+        hamlib_query(rig, q)
 
-    rx_old = tuning = up_old = 0
+    rot = None
+    if len(args.rothost) > 0:
+        rot = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        rot.connect((args.rothost, args.rotport))
+        rot.settimeout(2.0)
+
+    rx_old = tuning = up_old = alt_old = az_old = 0
     while True:
         try:
             pos = (satellite - qth).at(load.timescale().now())
             _, _, _, _, _, range_rate = pos.frame_latlon_and_rates(qth)
+            alt, az, _ = pos.altaz()
             doppler = int(range_rate.km_per_s / 299792 * args.freq)
-            if rig_query(rig, 't') != '0':
+            if alt.degrees < args.horizon:
+                t, events = satellite.find_events(qth, load.timescale().now(), load.timescale().now() + 1/6,
+                                                  altitude_degrees=args.horizon)
+                alt, az, _ = (satellite - qth).at(t[0]).altaz()
+            if hamlib_query(rig, 't') != '0':
                 continue
-            rx = int(rig_query(rig, 'f'))
-            if rx_old > 0:
-                tuning += rx - rx_old
+            if not args.disable_tune:
+                rx = int(hamlib_query(rig, 'f'))
+                if rx_old > 0:
+                    tuning += rx - rx_old
             uplink = args.freq + doppler + tuning
             downlink = args.freq - doppler + tuning
             rx_old = downlink
             print(f'speed {range_rate.km_per_s:.02f} km/s, doppler {doppler:.0f}, '
+                  f'alt {alt.degrees:.01f}, az {az.degrees:.01f}, '
                   f'uplink {uplink:.0f}, downlink {downlink:.0f}, tuning {tuning}')
-            rig_query(rig, f'F {downlink}')
+            hamlib_query(rig, f'F {downlink}')
             if abs(uplink - up_old) > args.tunestep:
                 # print('set uplink')
-                rig_query(rig, f'I {uplink}')
+                hamlib_query(rig, f'I {uplink}')
                 up_old = uplink
+            if abs(az.degrees - az_old) > args.threshold or abs(alt.degrees - alt_old) > args.threshold:
+                if rot:
+                    hamlib_query(rot, f'P {az.degrees:.02f} {alt.degrees:.02f}')
+                else:
+                    print(f'P {az.degrees:.02f} {alt.degrees:.02f}')
+                az_old = az.degrees
+                alt_old = alt.degrees
             sleep(1)
         except KeyboardInterrupt:
             break
-    rig_query(rig, 'S 0 VFOA')  # Disable split mode
+    hamlib_query(rig, 'S 0 VFOA')  # Disable split mode
     rig.close()
+    if rot:
+        rot.close()
     print('Exiting')
 
 
@@ -74,17 +101,17 @@ def from_nasabare(norad, reload=False):
         return None
 
 
-def rig_query(rig, cmd):
-    rig.sendall(bytes(f'+{cmd}\n', encoding='ascii'))
+def hamlib_query(r, cmd):
+    r.sendall(bytes(f'+{cmd}\n', encoding='ascii'))
     try:
-        data = rig.recv(1024).splitlines()
+        data = r.recv(1024).splitlines()
     except TimeoutError:
         return None
     if len(data) < 2:
-        print('bad response')
+        print(f'bad response: {data}')
         return None
     if data[-1] != b'RPRT 0':
-        print('bad report')
+        print(f'bad report: {data[-1]}')
         return None
     return data[-2].decode().split(':')[1].strip()
 
