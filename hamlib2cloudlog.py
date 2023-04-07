@@ -10,8 +10,9 @@ from time import sleep
 
 # Perhaps in the future use https://db.satnogs.org/api/transmitters/?format=json
 # Sat list: name, dn_lo, dn_hi, up_lo, up_hi
+# Do note that some of these overlap, you should comment out the ones you don't use or force --satname
 satellites = [
-    ['AO-7', 145925000, 145975000, 4320125000, 432175000],  # 7530 Oscar 7
+    ['AO-7', 145925000, 145975000, 432125000, 432175000],  # 7530 Oscar 7
     ['AO-27', 436798000, 436798000, 145850000, 145850000],  # 22825 EYESAT-1
     ['AO-73', 145950000, 145970000, 435130000, 435150000],  # 39444 FUNCUBE-1
     ['AO-91', 145960000, 145960000, 435250000, 435250000],  # 43017 FOX-1B
@@ -50,15 +51,22 @@ def main():
     parser.add_argument('-a', '--apikey', default='', type=str, help='API Key', required=True)
     parser.add_argument('-u', '--apiurl', default='http://localhost:9005/api/radio', type=str, help='API URL')
     parser.add_argument('-n', '--name', default='Radio', type=str, help='Radio name')
+    parser.add_argument('-s', '--satname', default='', type=str, help='Force satellite name')
     parser.add_argument('-r', '--righost', default='localhost', type=str, help='rigctld host')
     parser.add_argument('-p', '--rigport', default=4532, type=int, help='rigctl port')
     parser.add_argument('-v', '--verbosity', action='count', default=0, help='Increase verbosity')
     args = parser.parse_args()
 
+    if len(args.satname) == 0:
+        find_overlaps()
+    if args.verbosity > 0:
+        print(f'Connecting to rigctl {args.righost}:{args.rigport}...')
     rig = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     rig.connect((args.righost, args.rigport))
     rig.settimeout(2.0)
 
+    if args.verbosity > 0:
+        print(f'Sending API requests to {args.apiurl}')
     s = requests.Session()
     while True:
         try:
@@ -67,15 +75,33 @@ def main():
             vfob = int(hamlib_query(rig, 'i')[0])
             modeb = hamlib_query(rig, 'x')[0]
             split = hamlib_query(rig, 's')  # Detect radio mode and adjust API accordingly
-            api = {'key': args.apikey, 'radio': args.name, 'frequency': vfob, 'mode': modeb,
-                   'frequency_rx': vfoa, 'mode_rx': modea, 'prop_mode': 'SAT', 'sat_name': find_sat(vfob, vfoa)}
+            satname = args.satname if len(args.satname) > 0 else find_sat(vfob, vfoa)
+
+            if split[0] == '1' and 'VFO' in split[1]:
+                mode = 'Split'
+                api = {'key': args.apikey, 'radio': args.name, 'frequency': vfob, 'mode': modeb,
+                       'frequency_rx': vfoa, 'mode_rx': modea, 'prop_mode': 'SAT', 'sat_name': satname}
+            elif split[0] == '1':
+                mode = 'Sat'
+                api = {'key': args.apikey, 'radio': args.name, 'frequency': vfob, 'mode': modeb,
+                       'frequency_rx': vfoa, 'mode_rx': modea, 'prop_mode': 'SAT', 'sat_name': satname}
+            else:  # Simplex mode
+                mode = 'Simplex'
+                api = {'key': args.apikey, 'radio': args.name, 'frequency': vfoa, 'mode': modea}
+            if args.verbosity > 1:
+                print(f'API data: {api}')
+
             try:
-                s.post(args.apiurl, data=json.dumps(api))
+                r = s.post(args.apiurl, data=json.dumps(api))
+                if args.verbosity > 1:
+                    print(f'API response: {r.text}')
             except socket.error as e:
                 print(f'Connection Failed due to socket - {e}')
-            print(f'Sat: {api["sat_name"]}, Dn: {vfoa} {modea} Up: {vfob} {modeb}, split: {split}')
+
+            if args.verbosity > 0:
+                print(f'Sat: {satname}, A: {vfoa} {modea} , B: {vfob} {modeb}, mode: {mode}')
             sleep(2)
-        except KeyboardInterrupt or requests.exceptions.ConnectionError:
+        except KeyboardInterrupt:
             break
     rig.close()
     print('Exiting')
@@ -89,6 +115,19 @@ def find_sat(uplink, downlink):
            i[1] * (1 - tolerance) < downlink < i[2] * (1 + tolerance):
             return i[0]
     return ''
+
+
+def find_overlaps():
+    for i, sat1 in enumerate(satellites):
+        for sat2 in satellites[i:]:
+            if len(sat1) != 5 or len(sat2) != 5:
+                continue
+            if sat1[0] != sat2[0] and \
+                    sat2[1] * (1 - tolerance) <= sat1[1] <= sat2[2] * (1 + tolerance) and \
+                    sat2[1] * (1 - tolerance) <= sat1[2] <= sat2[2] * (1 + tolerance) and \
+                    sat2[3] * (1 - tolerance) <= sat1[3] <= sat2[4] * (1 + tolerance) and \
+                    sat2[3] * (1 - tolerance) <= sat1[4] <= sat2[4] * (1 + tolerance):
+                print(f'Warning: found frequency overlap between {sat1[0]} and {sat2[0]}')
 
 
 def hamlib_query(r, cmd):
