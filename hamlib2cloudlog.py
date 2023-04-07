@@ -76,6 +76,10 @@ def main():
             modeb = hamlib_query(rig, 'x')[0]
             split = hamlib_query(rig, 's')  # Detect radio mode and adjust API accordingly
             satname = args.satname if len(args.satname) > 0 else find_sat(vfob, vfoa)
+            if 'SB' in modea:
+                modea = 'SSB'
+            if 'SB' in modeb:
+                modeb = 'SSB'
 
             if split[0] == '1' and 'VFO' in split[1]:
                 mode = 'Split'
@@ -93,7 +97,9 @@ def main():
 
             try:
                 r = s.post(args.apiurl, data=json.dumps(api))
-                if args.verbosity > 1:
+                if 'status' in r.json() and 'success' not in r.json()['status']:
+                    print(f'API error: {r.text}')
+                elif args.verbosity > 1:
                     print(f'API response: {r.text}')
             except socket.error as e:
                 print(f'Connection Failed due to socket - {e}')
