@@ -15,6 +15,7 @@ def main():
     parser.add_argument('-t', '--tunestep', default=50, type=int, help='TX tuning step')
     parser.add_argument('-d', '--disable_tune', action='store_true', help='Disable VFO tuning on radio')
     parser.add_argument('-n', '--norad', default=53106, type=int, help='NORAD ID to track')
+    parser.add_argument('-i', '--interval', default=5, type=int, help='Time interval for loop (sleep)')
     parser.add_argument('-r', '--righost', default='localhost', type=str, help='rigctld host')
     parser.add_argument('-p', '--rigport', default=4532, type=int, help='rigctl port')
     parser.add_argument('-R', '--rothost', default='', type=str, help='rotctld host')
@@ -46,7 +47,7 @@ def main():
         rot.connect((args.rothost, args.rotport))
         rot.settimeout(2.0)
 
-    rx_old = tuning = up_old = alt_old = az_old = 0
+    rx_old = tuning = up_old = alt_old = az_old = up_last = 0
     while True:
         try:
             pos = (satellite - qth).at(load.timescale().now())
@@ -66,22 +67,22 @@ def main():
             uplink = args.freq + doppler + tuning
             downlink = args.freq - doppler + tuning
             rx_old = downlink
-            print(f'speed {range_rate.km_per_s:.02f} km/s, doppler {doppler:.0f}, '
-                  f'alt {alt.degrees:.01f}, az {az.degrees:.01f}, '
-                  f'uplink {uplink:.0f}, downlink {downlink:.0f}, tuning {tuning}')
+            print(f'doppler {doppler:.0f}, '
+                  f'altaz {alt.degrees:.01f} {az.degrees:.01f}, '
+                  f'uplink {uplink:.0f}, downlink {downlink:.0f}, tune {tuning}')
             hamlib_query(rig, f'F {downlink}')
-            if abs(uplink - up_old) > args.tunestep:
-                # print('set uplink')
+            if abs(uplink - up_old) > args.tunestep or up_last < 1:
+                print('set uplink')
                 hamlib_query(rig, f'I {uplink}')
                 up_old = uplink
-            if abs(az.degrees - az_old) > args.threshold or abs(alt.degrees - alt_old) > args.threshold:
-                if rot:
-                    hamlib_query(rot, f'P {az.degrees:.02f} {alt.degrees:.02f}')
-                else:
-                    print(f'P {az.degrees:.02f} {alt.degrees:.02f}')
+                up_last = 30  # Update at least every 30s
+            if abs(az.degrees - az_old) > args.threshold or abs(alt.degrees - alt_old) > args.threshold and rot:
+                hamlib_query(rot, f'P {az.degrees:.02f} {alt.degrees:.02f}')
+                print('set rotator')
                 az_old = az.degrees
                 alt_old = alt.degrees
-            sleep(1)
+            up_last -= args.interval
+            sleep(args.interval)
         except KeyboardInterrupt:
             break
     hamlib_query(rig, 'S 0 VFOA')  # Disable split mode
